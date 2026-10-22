@@ -1,0 +1,611 @@
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { StudyProof, StudyProofStatus } from '../types';
+import { xpService } from './xpService';
+import { notificationService } from './notificationService';
+import { relationshipService } from './relationshipService';
+
+const LOCAL_STORAGE_KEY = 'mahfaza_study_proofs_store';
+
+function getLocalProofs(): StudyProof[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalProofs(proofs: StudyProof[]) {
+  try {
+    const limitedProofs = proofs.slice(0, 50);
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(limitedProofs));
+  } catch (e: any) {
+    if (e.name === 'QuotaExceededError' || e.code === 22) {
+      console.warn('LocalStorage quota exceeded, clearing old data.');
+      localStorage.removeItem(LOCAL_STORAGE_KEY);
+      try {
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(proofs.slice(0, 20)));
+      } catch {
+        // Final attempt failed, just keep it empty
+      }
+    } else {
+      console.error('Failed to save study proofs to localStorage:', e);
+    }
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: any;
+  const timeoutPromise = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  return Promise.race([
+    promise.then((res) => {
+      clearTimeout(timer);
+      return res;
+    }),
+    timeoutPromise,
+  ]).catch(() => fallback);
+}
+
+export const isValidUUID = (val: string | null | undefined): boolean => {
+  if (!val || typeof val !== 'string') return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val.trim());
+};
+
+export const studyProofService = {
+  /**
+   * Helper to convert File to base64 string safely
+   */
+  async fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = (error) => reject(error);
+    });
+  },
+
+  /**
+   * Upload proof image to Supabase Storage or fallback to base64 with 5s timeout protection
+   */
+  async uploadProofPhoto(studentId: string, file: File): Promise<string> {
+    try {
+      const fileExt = file.name.split('.').pop() || 'jpg';
+      const fileName = `${studentId}/${Date.now()}_proof.${fileExt}`;
+      
+      const uploadPromise = supabase.storage
+        .from('study_proofs')
+        .upload(fileName, file, { upsert: true });
+
+      const timeoutPromise = new Promise<any>((_, reject) =>
+        setTimeout(() => reject(new Error('Storage upload timeout')), 5000)
+      );
+
+      const { data, error } = await Promise.race([uploadPromise, timeoutPromise]);
+
+      if (!error && data) {
+        const { data: publicUrlData } = supabase.storage
+          .from('study_proofs')
+          .getPublicUrl(fileName);
+        if (publicUrlData?.publicUrl) {
+          return publicUrlData.publicUrl;
+        }
+      }
+    } catch (err) {
+      console.warn('Storage upload note, using base64 fallback:', err);
+    }
+
+    return await this.fileToBase64(file);
+  },
+
+  /**
+   * Submit new study proof from student with 3s timeout protection
+   */
+  async submitStudyProof(payload: {
+    student_id: string;
+    coach_id?: string | null;
+    subject_id: string;
+    subject_name: string;
+    study_type?: string;
+    duration_minutes: number;
+    question_count: number;
+    study_note?: string;
+    proof_photo_url: string;
+    calculated_xp: number;
+  }): Promise<StudyProof> {
+    let safeCoachId = payload.coach_id && isValidUUID(payload.coach_id) ? payload.coach_id : null;
+
+    if (!safeCoachId && isSupabaseConfigured) {
+      try {
+        const assigned = await relationshipService.getStudentAssignedCoach(payload.student_id);
+        if (assigned?.id && isValidUUID(assigned.id)) {
+          safeCoachId = assigned.id;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const recordId = crypto.randomUUID();
+    const insertPayload: StudyProof = {
+      id: recordId,
+      student_id: payload.student_id,
+      coach_id: safeCoachId,
+      subject_id: payload.subject_id,
+      subject_name: payload.subject_name,
+      study_type: payload.study_type || 'Soru Çözümü',
+      duration_minutes: Number(payload.duration_minutes) || 0,
+      question_count: Number(payload.question_count) || 0,
+      study_note: payload.study_note || null,
+      proof_photo_url: payload.proof_photo_url,
+      calculated_xp: Number(payload.calculated_xp) || 0,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    };
+
+    try {
+      if (isSupabaseConfigured) {
+        const insertPromise = supabase
+          .from('study_proofs')
+          .insert(insertPayload)
+          .select()
+          .maybeSingle();
+
+        const timeoutPromise = new Promise<any>((_, reject) =>
+          setTimeout(() => reject(new Error('Database insert timeout')), 10000)
+        );
+
+        const { data, error } = await Promise.race([insertPromise, timeoutPromise]);
+
+        if (!error && data) {
+          const savedRecord = data as StudyProof;
+          const current = getLocalProofs();
+          saveLocalProofs([savedRecord, ...current.filter((p) => p.id !== savedRecord.id)]);
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('mahfaza:study-proof-created', { detail: savedRecord }));
+            window.dispatchEvent(new CustomEvent('mahfaza:study_proofs_updated', { detail: savedRecord }));
+            window.dispatchEvent(new CustomEvent('mahfaza:counts-updated'));
+          }
+
+          return savedRecord;
+        } else if (error) {
+          console.warn('Supabase remote insert warning:', error.message);
+        }
+      }
+    } catch (err: any) {
+      console.warn('Error during remote study proof submission, falling back to local cache:', err?.message);
+    }
+
+    // Fallback: save locally and return record so submission succeeds even offline / error
+    const current = getLocalProofs();
+    saveLocalProofs([insertPayload, ...current.filter((p) => p.id !== insertPayload.id)]);
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('mahfaza:study-proof-created', { detail: insertPayload }));
+      window.dispatchEvent(new CustomEvent('mahfaza:study_proofs_updated', { detail: insertPayload }));
+      window.dispatchEvent(new CustomEvent('mahfaza:counts-updated'));
+    }
+
+    return insertPayload;
+  },
+
+  /**
+   * Get all study proofs for a student with primary and secondary ID matching.
+   * Checks both student_id and user_id columns safely.
+   */
+  async getStudentStudyProofs(
+    studentId: string,
+    secondaryStudentId?: string
+  ): Promise<StudyProof[]> {
+    const candidateIds = Array.from(
+      new Set([studentId, secondaryStudentId].filter(Boolean))
+    ) as string[];
+
+    const local = getLocalProofs().filter(
+      (p) => candidateIds.includes(p.student_id) || (p as any).user_id && candidateIds.includes((p as any).user_id)
+    );
+
+    const fetchRemote = (async () => {
+      try {
+        // We only use student_id query as user_id column doesn't exist in study_proofs table.
+        // The studentPrimaryId passed is already the auth.uid() which matches student_id column.
+        const queries = [
+          supabase.from('study_proofs').select('*').in('student_id', candidateIds).order('created_at', { ascending: false })
+        ];
+        
+        const results = await Promise.allSettled(queries);
+        const map = new Map<string, StudyProof>();
+
+        results.forEach(res => {
+          if (res.status === 'fulfilled' && res.value.data) {
+            res.value.data.forEach((row: any) => {
+              if (row.id && !map.has(row.id)) {
+                map.set(row.id, {
+                  ...row,
+                  student_id: row.student_id || row.user_id || studentId,
+                } as StudyProof);
+              }
+            });
+          }
+        });
+
+        return Array.from(map.values());
+      } catch (err) {
+        console.warn('Remote study proofs fetch note:', err);
+      }
+      return [];
+    })();
+
+    const remoteProofs = await withTimeout(fetchRemote, 5000, []);
+    const combined = [...remoteProofs];
+    for (const item of local) {
+      if (!combined.some((c) => c.id === item.id)) {
+        combined.push(item);
+      }
+    }
+
+    return combined.sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+  },
+
+  /**
+   * Get all study proofs assigned to a coach or for linked students.
+   * Leverages students.coach_id, coach_students, coach_student_links, and RLS policies.
+   */
+  async getCoachStudyProofs(
+    coachId: string,
+    studentIds: string[] = []
+  ): Promise<StudyProof[]> {
+    const validCoachUUID = isValidUUID(coachId) ? coachId : null;
+    const cleanStudentIds = new Set<string>(studentIds.filter(Boolean));
+
+    // Proactively resolve students assigned via students.coach_id, coach_students, or coach_student_links
+    if (isSupabaseConfigured && validCoachUUID) {
+      try {
+        const [directRes, csRes, cslRes] = await Promise.allSettled([
+          supabase.from('students').select('id, user_id').eq('coach_id', validCoachUUID),
+          supabase.from('coach_students').select('student_id').eq('coach_id', validCoachUUID),
+          supabase.from('coach_student_links').select('student_id').eq('coach_id', validCoachUUID),
+        ]);
+
+        if (directRes.status === 'fulfilled' && directRes.value.data) {
+          directRes.value.data.forEach((r: any) => {
+            if (r.id) cleanStudentIds.add(r.id);
+            if (r.user_id) cleanStudentIds.add(r.user_id);
+          });
+        }
+        if (csRes.status === 'fulfilled' && csRes.value.data) {
+          csRes.value.data.forEach((r: any) => {
+            if (r.student_id) cleanStudentIds.add(r.student_id);
+          });
+        }
+        if (cslRes.status === 'fulfilled' && cslRes.value.data) {
+          cslRes.value.data.forEach((r: any) => {
+            if (r.student_id) cleanStudentIds.add(r.student_id);
+          });
+        }
+      } catch (err) {
+        console.warn('Notice resolving coach student IDs for proofs:', err);
+      }
+    }
+
+    const allStudentIds = Array.from(cleanStudentIds).filter((id) => isValidUUID(id));
+    const allStudentIdStrings = Array.from(cleanStudentIds);
+
+    const local = getLocalProofs().filter(
+      (p) =>
+        (validCoachUUID && p.coach_id === validCoachUUID) ||
+        allStudentIdStrings.includes(p.student_id) ||
+        ((p as any).user_id && allStudentIdStrings.includes((p as any).user_id))
+    );
+
+    const fetchRemote = (async (): Promise<StudyProof[]> => {
+      try {
+        const queryPromises: Promise<any>[] = [];
+
+        // 1. Direct query: by coach_id (if specified)
+        if (validCoachUUID) {
+          queryPromises.push(
+            Promise.resolve(
+              supabase
+                .from('study_proofs')
+                .select('*')
+                .eq('coach_id', validCoachUUID)
+                .order('created_at', { ascending: false })
+            )
+          );
+        }
+
+        // 2. Query by students.coach_id link (if not found above)
+        if (validCoachUUID) {
+          queryPromises.push(
+            Promise.resolve(
+              supabase
+                .from('study_proofs')
+                .select('*')
+                .or(`coach_id.eq.${validCoachUUID},coach_id.is.null`)
+                .in('student_id', allStudentIds)
+                .order('created_at', { ascending: false })
+            )
+          );
+        }
+
+        // 2. Direct query: by student_id matching assigned students
+        if (allStudentIds.length > 0) {
+          queryPromises.push(
+            Promise.resolve(
+              supabase
+                .from('study_proofs')
+                .select('*')
+                .in('student_id', allStudentIds)
+                .order('created_at', { ascending: false })
+            )
+          );
+        }
+
+        // 3. Fallback: Authenticated session query (Supabase RLS automatically returns proofs of assigned students)
+        queryPromises.push(
+          Promise.resolve(
+            supabase
+              .from('study_proofs')
+              .select('*')
+              .order('created_at', { ascending: false })
+              .limit(200)
+          )
+        );
+
+        const results = await Promise.allSettled(queryPromises);
+        const map = new Map<string, StudyProof>();
+
+        for (const res of results) {
+          if (res.status === 'fulfilled' && res.value?.data && Array.isArray(res.value.data)) {
+            for (const row of res.value.data) {
+              if (row && row.id && !map.has(row.id)) {
+                map.set(row.id, {
+                  ...row,
+                  student_id: row.student_id || row.user_id || '',
+                } as StudyProof);
+              }
+            }
+          }
+        }
+
+        return Array.from(map.values());
+      } catch (err) {
+        console.warn('Notice fetching remote study proofs:', err);
+        return [];
+      }
+    })();
+
+    const remoteProofs = await withTimeout(fetchRemote, 5000, []);
+    const combined = [...remoteProofs];
+    for (const item of local) {
+      if (!combined.some((c) => c.id === item.id)) {
+        combined.push(item);
+      }
+    }
+
+    return combined.sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+  },
+
+  /**
+   * Coach approves or rejects study proof and atomically deposits calculated XP into student's balance
+   */
+  async reviewStudyProof(
+    proofId: string,
+    status: 'approved' | 'rejected',
+    coachFeedback: string = '',
+    coachId: string = '',
+    proofRecord?: StudyProof
+  ): Promise<{ status: 'approved' | 'rejected'; awardedXP: number; studentId?: string }> {
+    const reviewedAt = new Date().toISOString();
+
+    // 1. Find proof from passed object, local storage, or Supabase
+    let targetProof: StudyProof | null = proofRecord || null;
+    const local = getLocalProofs();
+    const localIndex = local.findIndex((p) => p.id === proofId);
+
+    if (!targetProof && localIndex !== -1) {
+      targetProof = local[localIndex];
+    }
+
+    try {
+      const { data } = await supabase
+        .from('study_proofs')
+        .select('*')
+        .eq('id', proofId)
+        .maybeSingle();
+      if (data) {
+        targetProof = { ...(targetProof || {}), ...(data as StudyProof) };
+      }
+    } catch {
+      // Ignore remote fetch error
+    }
+
+    // Idempotency Guard: Prevent duplicate approval & double XP award
+    if (status === 'approved' && targetProof?.status === 'approved') {
+      return {
+        status: 'approved',
+        awardedXP: 0,
+        studentId: targetProof?.student_id,
+      };
+    }
+
+    // 2. Update status in Supabase study_proofs table
+    try {
+      const { error: updErr } = await supabase
+        .from('study_proofs')
+        .update({
+          status,
+          coach_feedback: coachFeedback.trim() || null,
+          reviewed_at: reviewedAt,
+          coach_id: coachId || targetProof?.coach_id || null,
+        })
+        .eq('id', proofId);
+
+      if (updErr) {
+        console.warn('Study proof remote status update note:', updErr.message);
+      }
+    } catch (e) {
+      console.warn('Study proof remote update exception:', e);
+    }
+
+    // 3. Update Local Storage cache
+    if (localIndex !== -1) {
+      local[localIndex] = {
+        ...local[localIndex],
+        status,
+        coach_feedback: coachFeedback.trim() || null,
+        reviewed_at: reviewedAt,
+      };
+      saveLocalProofs(local);
+    } else if (targetProof) {
+      saveLocalProofs([
+        {
+          ...targetProof,
+          status,
+          coach_feedback: coachFeedback.trim() || null,
+          reviewed_at: reviewedAt,
+        },
+        ...local,
+      ]);
+    }
+
+    // 4. If APPROVED, deposit calculated_xp into student's XP balance & xp_transactions
+    let awardedXP = 0;
+    if (status === 'approved' && targetProof && targetProof.student_id) {
+      awardedXP = Math.max(5, Number(targetProof.calculated_xp) || 25);
+      const reason = `[Fotoğraflı Kanıt Onayı] ${targetProof.subject_name || 'Çalışma Seansı'} (${targetProof.duration_minutes || 0} dk, ${targetProof.question_count || 0} soru)`;
+
+      const xpRes = await xpService.awardXPAtomic({
+        student_id: targetProof.student_id,
+        base_amount: awardedXP,
+        action_type: 'study_proof_approved',
+        description: reason,
+        reference_id: targetProof.id,
+      });
+
+      awardedXP = xpRes.awarded_xp || awardedXP;
+
+      // ACTION 3: Immediately notify student on photo evidence approval
+      try {
+        await notificationService.createNotification({
+          user_id: targetProof.student_id,
+          title: 'Çalışma Kanıtı Onaylandı 🎯',
+          message: `Tebrikler! ${targetProof.subject_name || 'Çalışma'} fotoğrafınız koçunuz tarafından onaylandı ve hesabınıza +${awardedXP} XP tanımlandı.`,
+          type: 'xp',
+          link: '/student/xp',
+        });
+      } catch (notifErr) {
+        console.warn('Proof approval notification warning:', notifErr);
+      }
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('mahfaza:counts-updated'));
+      window.dispatchEvent(new CustomEvent('mahfaza:new_notification', { detail: { user_id: targetProof?.student_id } }));
+      window.dispatchEvent(
+        new CustomEvent('mahfaza:xp-updated', {
+          detail: { studentId: targetProof?.student_id, amount: awardedXP },
+        })
+      );
+    }
+
+    return {
+      status,
+      awardedXP,
+      studentId: targetProof?.student_id,
+    };
+  },
+
+  /**
+   * True Deletion of Photo Study Proof (Storage + DB Integration)
+   * 1. Verifies coach authorization
+   * 2. Deletes physical file from Supabase Storage ('study_proofs' bucket) if applicable
+   * 3. Deletes record from Supabase 'study_proofs' table and local cache
+   */
+  async deleteStudyProof(
+    proof: StudyProof,
+    coachId: string,
+    authorizedStudentIds: string[] = []
+  ): Promise<void> {
+    if (!coachId) {
+      throw new Error('Silme işlemi için koç oturumu doğrulanamadı.');
+    }
+
+    // 1. Verify coach permission
+    const isAuthorized =
+      proof.coach_id === coachId ||
+      authorizedStudentIds.includes(proof.student_id);
+
+    if (!isAuthorized) {
+      throw new Error('Bu çalışma kanıtını silmek için yetkiniz bulunmamaktadır.');
+    }
+
+    // 2. Delete physical file object from Supabase Storage if URL is a storage URL (not base64 data URI)
+    const photoUrl = proof.proof_photo_url || '';
+    if (photoUrl && !photoUrl.startsWith('data:')) {
+      let storagePath: string | null = null;
+      const publicMarker = '/storage/v1/object/public/study_proofs/';
+      const signedMarker = '/storage/v1/object/sign/study_proofs/';
+
+      if (photoUrl.includes(publicMarker)) {
+        storagePath = decodeURIComponent(photoUrl.split(publicMarker)[1]?.split('?')[0] || '');
+      } else if (photoUrl.includes(signedMarker)) {
+        storagePath = decodeURIComponent(photoUrl.split(signedMarker)[1]?.split('?')[0] || '');
+      } else if (!photoUrl.startsWith('http')) {
+        storagePath = photoUrl;
+      }
+
+      if (storagePath) {
+        const { error: storageError } = await supabase.storage
+          .from('study_proofs')
+          .remove([storagePath]);
+
+        if (storageError) {
+          console.error('Storage file deletion error:', storageError);
+          throw new Error(
+            `Depolama alanından fotoğraf silinemedi (${storageError.message}). Veritabanı bütünlüğü için kayıt silme işlemi durduruldu.`
+          );
+        }
+      }
+    }
+
+    // 3. Delete record from Supabase DB
+    try {
+      const { error: dbError } = await supabase
+        .from('study_proofs')
+        .delete()
+        .eq('id', proof.id);
+
+      if (dbError) {
+        // If table doesn't exist in remote environment, log warning; otherwise throw if permission/constraint error
+        const msg = dbError.message || '';
+        if (
+          !msg.includes('relation') &&
+          !msg.includes('does not exist') &&
+          !msg.includes('schema cache')
+        ) {
+          throw new Error(`Veritabanı kaydı silinemedi: ${dbError.message}`);
+        }
+      }
+    } catch (err: any) {
+      if (err.message?.startsWith('Veritabanı kaydı silinemedi:')) {
+        throw err;
+      }
+    }
+
+    // 4. Remove from local fallback store so it never resurfaces
+    const current = getLocalProofs();
+    saveLocalProofs(current.filter((p) => p.id !== proof.id));
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('mahfaza:counts-updated'));
+    }
+  },
+};
