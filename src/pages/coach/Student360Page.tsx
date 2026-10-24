@@ -90,11 +90,34 @@ export const Student360Page: React.FC = () => {
     }
 
     try {
-      if (isInitial && !student) {
+      if (isInitial) {
         setLoading(true);
+
+        // Instant local cache hydration for student profile to eliminate any visual lag
+        try {
+          const cachedStudsRaw = localStorage.getItem(`mahfaza_coach_students_${user.id}`);
+          if (cachedStudsRaw) {
+            const cachedStuds = JSON.parse(cachedStudsRaw);
+            const found = cachedStuds.find((s: any) => s.id === studentId);
+            if (found) {
+              const { first_name, last_name } = formatStudentName(
+                found.first_name,
+                found.last_name,
+                found.full_name,
+                found.name
+              );
+              setStudent({
+                ...found,
+                first_name,
+                last_name,
+              });
+            }
+          }
+        } catch { /* ignore */ }
+      } else {
+        setIsSyncing(true);
       }
-      setIsSyncing(true);
-      
+
       // 1. Authoritative check: Is this student assigned to this coach?
       const isAssigned = await relationshipService.isStudentAssignedToCoach(user.id, studentId).catch(() => true);
       setAuthorized(isAssigned);
@@ -169,13 +192,10 @@ export const Student360Page: React.FC = () => {
       setLoading(false);
       setIsSyncing(false);
     }
-  }, [user?.id, studentId, student]);
+  }, [user?.id, studentId]);
 
   useEffect(() => {
     loadData(true);
-    const safetyTimer = setTimeout(() => {
-      setLoading(false);
-    }, 500);
 
     const handleLiveSync = () => {
       loadData(false);
@@ -205,7 +225,6 @@ export const Student360Page: React.FC = () => {
     }
 
     return () => {
-      clearTimeout(safetyTimer);
       window.removeEventListener('mahfaza:task_created', handleLiveSync);
       window.removeEventListener('mahfaza:tasks_updated', handleLiveSync);
       window.removeEventListener('mahfaza:exam-updated', handleLiveSync);

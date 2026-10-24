@@ -40,6 +40,11 @@ export const MessagingPage: React.FC = () => {
   // Mobile View Toggle: 'list' or 'chat'
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list');
 
+  const [messagesError, setMessagesError] = useState<string | null>(null);
+
+  const activeConvIdRef = useRef<string | null>(null);
+  activeConvIdRef.current = activeConvId;
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const loadConversations = useCallback(async () => {
@@ -48,7 +53,7 @@ export const MessagingPage: React.FC = () => {
       setLoading(true);
       const convs = await messagingService.getUserConversations(user.id);
       setConversations(convs);
-      if (convs.length > 0 && !activeConvId) {
+      if (convs.length > 0 && !activeConvIdRef.current) {
         setActiveConvId(convs[0].id);
       }
     } catch (err) {
@@ -56,20 +61,30 @@ export const MessagingPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [user?.id, activeConvId]);
+  }, [user?.id]);
 
   const loadMessages = useCallback(async (convId: string) => {
-    if (!user?.id) return;
+    if (!user?.id || !convId) return;
+    setLoadingMessages(true);
+    setMessagesError(null);
+    setSendError(null);
+
     try {
-      setLoadingMessages(true);
-      setSendError(null);
       const msgs = await messagingService.getConversationMessages(convId, user.id);
-      setMessages(msgs);
-      await messagingService.markConversationRead(convId, user.id);
-    } catch (err) {
+      // Race condition protection: only update state if convId is still the active conversation!
+      if (activeConvIdRef.current === convId) {
+        setMessages(msgs);
+        await messagingService.markConversationRead(convId, user.id);
+      }
+    } catch (err: any) {
       console.error('Error loading messages:', err);
+      if (activeConvIdRef.current === convId) {
+        setMessagesError(err.message || 'Mesajlar yüklenirken bir sorun oluştu.');
+      }
     } finally {
-      setLoadingMessages(false);
+      if (activeConvIdRef.current === convId) {
+        setLoadingMessages(false);
+      }
     }
   }, [user?.id]);
 
@@ -434,7 +449,18 @@ export const MessagingPage: React.FC = () => {
                   </span>
                 </div>
 
-                {loadingMessages ? (
+                {messagesError ? (
+                  <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-center text-xs text-rose-800 my-4 space-y-2">
+                    <p>{messagesError}</p>
+                    <button
+                      type="button"
+                      onClick={() => activeConvId && loadMessages(activeConvId)}
+                      className="px-3 py-1 rounded-lg bg-rose-600 text-white font-semibold cursor-pointer hover:bg-rose-700 transition-colors inline-block"
+                    >
+                      Yeniden Deneyin
+                    </button>
+                  </div>
+                ) : loadingMessages ? (
                   <div className="text-center text-xs text-slate-500 py-10 font-mono">
                     Mesajlar yükleniyor...
                   </div>

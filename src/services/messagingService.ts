@@ -7,32 +7,63 @@ export const messagingService = {
    */
   async getUserConversations(userId: string): Promise<Conversation[]> {
     try {
-      // Find all messages where user is either sender or receiver
-      const { data: allMsgs, error } = await supabase
+      const partnerIds = new Set<string>();
+      const partnerLastMsg = new Map<string, any>();
+      const partnerUnread = new Map<string, number>();
+
+      // 1. Find all messages where user is either sender or receiver
+      const { data: allMsgs } = await supabase
         .from('messages')
         .select('*')
         .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
         .order('created_at', { ascending: false });
 
-      if (error || !allMsgs || allMsgs.length === 0) {
-        return [];
+      if (allMsgs && Array.isArray(allMsgs)) {
+        for (const m of allMsgs) {
+          const partnerId = m.sender_id === userId ? m.receiver_id : m.sender_id;
+          if (!partnerId) continue;
+          partnerIds.add(partnerId);
+          if (!partnerLastMsg.has(partnerId)) {
+            partnerLastMsg.set(partnerId, m);
+          }
+          if (m.receiver_id === userId && !m.is_read) {
+            partnerUnread.set(partnerId, (partnerUnread.get(partnerId) || 0) + 1);
+          }
+        }
       }
 
-      // Group by chat partner
-      const partnerIds = new Set<string>();
-      const partnerLastMsg = new Map<string, any>();
-      const partnerUnread = new Map<string, number>();
+      // 2. Also automatically populate assigned relationships (coach/students) so conversation list is never empty
+      try {
+        const { data: userProf } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle();
+        const role = userProf?.role;
 
-      for (const m of allMsgs) {
-        const partnerId = m.sender_id === userId ? m.receiver_id : m.sender_id;
-        if (!partnerId) continue;
-        partnerIds.add(partnerId);
-        if (!partnerLastMsg.has(partnerId)) {
-          partnerLastMsg.set(partnerId, m);
+        if (role === 'coach' || role === 'head_coach') {
+          const { data: directStuds } = await supabase.from('students').select('id, user_id').eq('coach_id', userId);
+          if (directStuds) {
+            directStuds.forEach((s: any) => {
+              if (s.user_id) partnerIds.add(s.user_id);
+              if (s.id) partnerIds.add(s.id);
+            });
+          }
+          const { data: links } = await supabase.from('coach_student_links').select('student_id').eq('coach_id', userId);
+          if (links) {
+            links.forEach((l: any) => {
+              if (l.student_id) partnerIds.add(l.student_id);
+            });
+          }
+        } else {
+          // Student role: get assigned coach
+          const { data: studRec } = await supabase.from('students').select('coach_id').or(`id.eq.${userId},user_id.eq.${userId}`).maybeSingle();
+          if (studRec?.coach_id) {
+            partnerIds.add(studRec.coach_id);
+          }
+          const { data: linkRec } = await supabase.from('coach_student_links').select('coach_id').eq('student_id', userId).maybeSingle();
+          if (linkRec?.coach_id) {
+            partnerIds.add(linkRec.coach_id);
+          }
         }
-        if (m.receiver_id === userId && !m.is_read) {
-          partnerUnread.set(partnerId, (partnerUnread.get(partnerId) || 0) + 1);
-        }
+      } catch {
+        // ignore relationship lookup errors
       }
 
       if (partnerIds.size === 0) return [];
@@ -78,9 +109,11 @@ export const messagingService = {
         });
       }
 
-      return conversations.sort(
-        (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-      );
+      return conversations.sort((a, b) => {
+        if (a.last_message && !b.last_message) return -1;
+        if (!a.last_message && b.last_message) return 1;
+        return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+      });
     } catch (err) {
       console.error('Error fetching conversations:', err);
       return [];
@@ -105,7 +138,10 @@ export const messagingService = {
         .or(`and(sender_id.eq.${myId},receiver_id.eq.${conversationId}),and(sender_id.eq.${conversationId},receiver_id.eq.${myId})`)
         .order('created_at', { ascending: true });
 
-      if (error) throw new Error(error.message);
+      if (error) {
+        console.warn('Notice fetching conversation messages:', error.message);
+        throw error;
+      }
 
       const senderIds = [...new Set((data || []).map((m: any) => m.sender_id))];
       let profileMap = new Map<string, Profile>();
@@ -133,7 +169,7 @@ export const messagingService = {
       }));
     } catch (err) {
       console.error('Error fetching conversation messages:', err);
-      return [];
+      throw err;
     }
   },
 

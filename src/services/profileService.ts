@@ -117,11 +117,31 @@ export const profileService = {
       payload.username = cleanUsername;
     }
 
-    if (updates.school_name !== undefined) {
-      payload.school_name = updates.school_name;
+    const cleanSchoolName =
+      updates.school_name === undefined
+        ? undefined
+        : updates.school_name === null || updates.school_name === ''
+        ? null
+        : typeof updates.school_name === 'string'
+        ? updates.school_name.trim()
+        : null;
+
+    const cleanGradeLevel =
+      updates.grade_level === undefined
+        ? undefined
+        : updates.grade_level === null
+        ? null
+        : typeof updates.grade_level === 'number' && !isNaN(updates.grade_level)
+        ? updates.grade_level
+        : typeof updates.grade_level === 'string'
+        ? parseInt(updates.grade_level, 10) || null
+        : null;
+
+    if (cleanSchoolName !== undefined) {
+      payload.school_name = cleanSchoolName;
     }
-    if (updates.grade_level !== undefined) {
-      payload.grade_level = updates.grade_level;
+    if (cleanGradeLevel !== undefined) {
+      payload.grade_level = cleanGradeLevel;
     }
     if (updates.avatar_url !== undefined) {
       payload.avatar_url = updates.avatar_url;
