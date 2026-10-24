@@ -16,6 +16,7 @@ import { Input } from '../../components/ui/Input';
 import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { LoadingState } from '../../components/ui/EmptyState';
+import { SyncIndicator } from '../../components/ui/SyncIndicator';
 import {
   FileText,
   Plus,
@@ -46,6 +47,7 @@ const STUDY_TYPES = [
 export const StudentStudyLogsPage: React.FC = () => {
   const { user, profile } = useAuth();
   const [loading, setLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [proofs, setProofs] = useState<StudyProof[]>([]);
   const [coachId, setCoachId] = useState<string | null>(null);
 
@@ -101,6 +103,7 @@ export const StudentStudyLogsPage: React.FC = () => {
       if (isInitial && proofs.length === 0) {
         setLoading(true);
       }
+      setIsSyncing(true);
       
       const fetchPromise = Promise.all([
         studyProofService.getStudentStudyProofs(studentPrimaryId, studentSecondaryId),
@@ -128,6 +131,7 @@ export const StudentStudyLogsPage: React.FC = () => {
     } finally {
       if (requestId === lastRequestId.current) {
         setLoading(false);
+        setIsSyncing(false);
       }
     }
   }, [studentPrimaryId, studentSecondaryId, proofs.length]);
@@ -334,6 +338,8 @@ export const StudentStudyLogsPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <SyncIndicator isSyncing={isSyncing} label="Çalışma kayıtları eşitleniyor..." />
+
       {/* Toast Notification */}
       {toastMessage && (
         <div
@@ -355,9 +361,10 @@ export const StudentStudyLogsPage: React.FC = () => {
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200/80">
         <div>
-          <span className="text-xs font-semibold text-amber-600 uppercase tracking-wider flex items-center gap-1.5">
+          <span className="text-xs font-semibold text-amber-600 uppercase tracking-wider flex items-center gap-1.5 flex-wrap">
             <FileText className="w-4 h-4" />
             Öğrenci Çalışma Paneli
+            <SyncIndicator isSyncing={isSyncing} variant="inline" label="Eşitleniyor..." />
           </span>
           <h1 className="text-2xl font-black text-slate-900 tracking-tight mt-0.5">
             Çalışma Kayıtlarım & Fotoğraflı Kanıtlar

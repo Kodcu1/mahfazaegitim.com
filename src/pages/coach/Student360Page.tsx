@@ -27,6 +27,7 @@ import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { Input } from '../../components/ui/Input';
 import { EmptyState, LoadingState } from '../../components/ui/EmptyState';
+import { SyncIndicator } from '../../components/ui/SyncIndicator';
 import { generateStudent360PDF } from '../../utils/student360PdfGenerator';
 import {
   ShieldAlert,
@@ -64,6 +65,7 @@ export const Student360Page: React.FC = () => {
   const [inspectProof, setInspectProof] = useState<StudyProof | null>(null);
   const [deletingProofId, setDeletingProofId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Manual XP Modal State
   const [xpModalOpen, setXpModalOpen] = useState(false);
@@ -83,6 +85,7 @@ export const Student360Page: React.FC = () => {
   const loadData = useCallback(async (isInitial = false) => {
     if (!user?.id || !studentId) {
       setLoading(false);
+      setIsSyncing(false);
       return;
     }
 
@@ -90,6 +93,7 @@ export const Student360Page: React.FC = () => {
       if (isInitial && !student) {
         setLoading(true);
       }
+      setIsSyncing(true);
       
       // 1. Authoritative check: Is this student assigned to this coach?
       const isAssigned = await relationshipService.isStudentAssignedToCoach(user.id, studentId).catch(() => true);
@@ -163,6 +167,7 @@ export const Student360Page: React.FC = () => {
       console.warn('Notice loading Student 360 data:', err);
     } finally {
       setLoading(false);
+      setIsSyncing(false);
     }
   }, [user?.id, studentId, student]);
 
@@ -421,6 +426,8 @@ export const Student360Page: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <SyncIndicator isSyncing={isSyncing} label="360° Veriler senkronize ediliyor..." />
+
       {/* Printable Report Header / Normal Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-200 bg-white p-5 rounded-2xl shadow-xs">
         <div className="flex items-center gap-4">
@@ -445,8 +452,9 @@ export const Student360Page: React.FC = () => {
                 Öğrenci Portföyü
               </Link>
               <span className="text-gray-400 print:hidden">&bull;</span>
-              <span className="text-xs font-mono text-amber-700 font-semibold uppercase tracking-wider">
+              <span className="text-xs font-mono text-amber-700 font-semibold uppercase tracking-wider flex items-center gap-2">
                 Öğrenci 360° Akademik Profil
+                <SyncIndicator isSyncing={isSyncing} variant="inline" label="Güncelleniyor..." />
               </span>
               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-900 font-bold text-[11px]">
                 <Crown className="w-3 h-3 text-amber-600" />

@@ -117,26 +117,52 @@ export const profileService = {
       payload.username = cleanUsername;
     }
 
-    // Note: school_name and grade_level are currently missing from the public.profiles table
-    // in some environments. We store them in auth user_metadata instead to prevent errors.
-    /* 
     if (updates.school_name !== undefined) {
       payload.school_name = updates.school_name;
     }
     if (updates.grade_level !== undefined) {
       payload.grade_level = updates.grade_level;
     }
-    */
     if (updates.avatar_url !== undefined) {
       payload.avatar_url = updates.avatar_url;
     }
 
-    const { data, error } = await supabase
+    let data: any = null;
+    let error: any = null;
+
+    const res = await supabase
       .from('profiles')
       .update(payload)
       .eq('id', userId)
       .select('*')
       .maybeSingle();
+
+    data = res.data;
+    error = res.error;
+
+    // Graceful fallback for environments where grade_level or school_name columns are not yet in the PostgREST schema cache
+    if (
+      error &&
+      (error.message?.includes('schema cache') ||
+        error.message?.includes('column') ||
+        error.message?.includes('grade_level') ||
+        error.message?.includes('school_name'))
+    ) {
+      console.warn('Profiles schema cache note: retrying update without schema-sensitive fields:', error.message);
+      const safePayload = { ...payload };
+      delete safePayload.grade_level;
+      delete safePayload.school_name;
+
+      const retryRes = await supabase
+        .from('profiles')
+        .update(safePayload)
+        .eq('id', userId)
+        .select('*')
+        .maybeSingle();
+
+      data = retryRes.data;
+      error = retryRes.error;
+    }
 
     if (error || !data) {
       const isDemo =
@@ -168,7 +194,11 @@ export const profileService = {
       throw new Error(`Profil güncellenemedi: ${message}`);
     }
 
-    const updatedProfile = normalizeProfile(data);
+    const updatedProfile = {
+      ...normalizeProfile(data),
+      ...(updates.school_name !== undefined ? { school_name: updates.school_name } : {}),
+      ...(updates.grade_level !== undefined ? { grade_level: updates.grade_level } : {}),
+    };
 
     // Metadata senkronizasyonu ikincil işlemdir.
     // Base64 görselleri JWT boyutunu büyütmemesi için metadata'ya yazılmaz.

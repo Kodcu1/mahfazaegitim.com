@@ -15,6 +15,7 @@ import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { EmptyState, LoadingState } from '../../components/ui/EmptyState';
+import { SyncIndicator } from '../../components/ui/SyncIndicator';
 import {
   Flame,
   Award,
@@ -54,6 +55,7 @@ export const StudentDashboardPage: React.FC = () => {
   const [subscription, setSubscription] = useState<UserSubscription | null>(null);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Study Action Modal State
   const [actionModalOpen, setActionModalOpen] = useState(false);
@@ -65,10 +67,12 @@ export const StudentDashboardPage: React.FC = () => {
   const loadStudentData = useCallback(async () => {
     if (!user?.id && !profile?.id) {
       setLoading(false);
+      setIsSyncing(false);
       return;
     }
 
     try {
+      setIsSyncing(true);
       const studentPrimaryId = profile?.id || user?.id || '';
       const studentSecondaryId = user?.id !== profile?.id ? user?.id : undefined;
 
@@ -101,6 +105,7 @@ export const StudentDashboardPage: React.FC = () => {
       // Graceful fallback for offline or schema cache sync
     } finally {
       setLoading(false);
+      setIsSyncing(false);
     }
   }, [user?.id, user?.email, profile?.id]);
 
@@ -212,11 +217,16 @@ export const StudentDashboardPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <SyncIndicator isSyncing={isSyncing} label="Kumanda Masası eşitleniyor..." />
+
       {/* Top Banner & Quick Action */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200/80">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-xs font-semibold text-amber-600 tracking-wider uppercase">Mahfaza.co Kumanda Masası</span>
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span className="text-xs font-semibold text-amber-600 tracking-wider uppercase flex items-center gap-1.5">
+              Mahfaza.co Kumanda Masası
+              <SyncIndicator isSyncing={isSyncing} variant="inline" label="Eşitleniyor..." />
+            </span>
             <Link
               to="/pricing"
               className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-900 hover:bg-amber-200 transition-colors inline-flex items-center gap-1"

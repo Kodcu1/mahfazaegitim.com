@@ -11,6 +11,7 @@ import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
 import { EmptyState, LoadingState } from '../../components/ui/EmptyState';
+import { SyncIndicator } from '../../components/ui/SyncIndicator';
 import {
   Users,
   Search,
@@ -39,6 +40,7 @@ export const CoachStudentsPage: React.FC = () => {
   const [studentSubMap, setStudentSubMap] = useState<Record<string, UserSubscription | null>>({});
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Pairing Modal
   const [pairModalOpen, setPairModalOpen] = useState(false);
@@ -96,6 +98,7 @@ export const CoachStudentsPage: React.FC = () => {
   const loadData = useCallback(async () => {
     if (!user?.id) {
       setLoading(false);
+      setIsSyncing(false);
       return;
     }
     const cacheKey = `mahfaza_coach_students_${user.id}`;
@@ -112,6 +115,8 @@ export const CoachStudentsPage: React.FC = () => {
         }
       }
     } catch { /* ignore */ }
+
+    setIsSyncing(true);
 
     // 2. Fresh Fetch with background update
     try {
@@ -153,6 +158,7 @@ export const CoachStudentsPage: React.FC = () => {
       console.error('Coach portfolio sync error:', err);
     } finally {
       setLoading(false);
+      setIsSyncing(false);
     }
   }, [user?.id, getUnlinkedIds]);
 
@@ -310,12 +316,15 @@ export const CoachStudentsPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <SyncIndicator isSyncing={isSyncing} label="Portföy eşitleniyor..." />
+
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200/80">
         <div>
-          <span className="text-xs font-semibold text-amber-600 uppercase tracking-wider flex items-center gap-1.5">
+          <span className="text-xs font-semibold text-amber-600 uppercase tracking-wider flex items-center gap-1.5 flex-wrap">
             <Users className="w-4 h-4" />
             Öğrenci Portföy Yönetimi
+            <SyncIndicator isSyncing={isSyncing} variant="inline" label="Eşitleniyor..." />
           </span>
           <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight mt-1">
             Öğrenci Portföyüm

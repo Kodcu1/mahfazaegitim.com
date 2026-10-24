@@ -255,6 +255,18 @@ export class CoachStudentService {
         );
 
         if (candidateIds.length === 0) {
+          // Clear cache when 0 assigned students are found so unlinked/ghost data never reappears
+          try {
+            const saveKey = coach.primaryUuid
+              ? `mahfaza_coach_students_${coach.primaryUuid}`
+              : cacheKey;
+            localStorage.setItem(saveKey, JSON.stringify([]));
+            if (coachId && coachId !== coach.primaryUuid) {
+              localStorage.setItem(`mahfaza_coach_students_${coachId}`, JSON.stringify([]));
+            }
+          } catch {
+            // ignore
+          }
           return [];
         }
 
